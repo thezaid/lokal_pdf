@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF OCR Extractor</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- pdf.js from Mozilla to handle PDF rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.min.js"></script>
+    <!-- Tesseract.js for OCR -->
+    <script src='https://cdn.jsdelivr.net/npm/tesseract.js@2.1.5/dist/tesseract.min.js'></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Custom styles for the loader */
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        /* Custom file input styling */
+        .custom-file-input::-webkit-file-upload-button {
+            visibility: hidden;
+        }
+        .custom-file-input::before {
+            content: 'Select PDF';
+            display: inline-block;
+            background: #3B82F6; /* bg-blue-500 */
+            color: white;
+            border-radius: 0.375rem; /* rounded-md */
+            padding: 0.5rem 1rem; /* px-4 py-2 */
+            outline: none;
+            white-space: nowrap;
+            -webkit-user-select: none;
+            cursor: pointer;
+            font-weight: 500; /* font-medium */
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05); /* shadow-sm */
+        }
+        .custom-file-input:hover::before {
+            background: #2563EB; /* hover:bg-blue-600 */
+        }
+        .custom-file-input:active::before {
+            background: #1D4ED8; /* active:bg-blue-700 */
+        }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800 flex items-center justify-center min-h-screen">
+
+    <div class="bg-white rounded-xl shadow-lg p-6 md:p-8 w-full max-w-3xl m-4">
+        <!-- Header Section -->
+        <div class="text-center mb-6">
+            <h1 class="text-3xl font-bold text-gray-900">PDF OCR Extractor</h1>
+            <p class="text-gray-500 mt-2">Upload a PDF file to extract its text content.</p>
+        </div>
+
+        <!-- File Upload Section -->
+        <div class="flex flex-col items-center justify-center border-2 border-dashed border-gray-300 rounded-lg p-8 md:p-12 text-center mb-6">
+            <svg class="w-12 h-12 text-gray-400 mb-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16a4 4 0 01-4-4V6a4 4 0 014-4h10a4 4 0 014 4v6a4 4 0 01-4 4H7z" />
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m3-3H7" />
+            </svg>
+            <input type="file" id="pdf-upload" class="text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" accept=".pdf">
+            <p id="file-name" class="text-sm text-gray-500 mt-2"></p>
+        </div>
+        
+        <!-- Control and Status Section -->
+        <div class="flex flex-col md:flex-row items-center justify-between mb-6">
+            <button id="extract-btn" class="w-full md:w-auto bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-6 rounded-lg transition duration-300 ease-in-out disabled:bg-gray-400 disabled:cursor-not-allowed">
+                Extract Text
+            </button>
+            <div id="status" class="flex items-center mt-4 md:mt-0">
+                <div id="loader" class="loader hidden mr-3"></div>
+                <p id="status-text" class="text-gray-600"></p>
+            </div>
+        </div>
+
+        <!-- Extracted Text Section -->
+        <div class="bg-gray-50 rounded-lg p-4 border border-gray-200">
+             <div class="flex justify-between items-center mb-2">
+                <h2 class="text-lg font-semibold text-gray-700">Extracted Text:</h2>
+                <div class="flex items-center space-x-2">
+                    <button id="copy-btn" class="bg-gray-200 hover:bg-gray-300 text-gray-700 text-sm font-medium py-1 px-3 rounded-md transition duration-200">Copy</button>
+                    <button id="save-btn" class="bg-blue-500 hover:bg-blue-600 text-white text-sm font-medium py-1 px-3 rounded-md transition duration-200">Save as .txt</button>
+                </div>
+            </div>
+            <pre id="output" class="whitespace-pre-wrap text-sm text-gray-800 bg-white p-4 rounded-md h-96 overflow-y-auto"></pre>
+        </div>
+    </div>
+
+    <script>
+        // Set the workerSrc for pdf.js
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js';
+
+        const pdfUpload = document.getElementById('pdf-upload');
+        const fileNameDisplay = document.getElementById('file-name');
+        const extractBtn = document.getElementById('extract-btn');
+        const copyBtn = document.getElementById('copy-btn');
+        const saveBtn = document.getElementById('save-btn');
+        const output = document.getElementById('output');
+        const loader = document.getElementById('loader');
+        const statusText = document.getElementById('status-text');
+        
+        let pdfFile = null;
+
+        // Update file name display on file selection
+        pdfUpload.addEventListener('change', (event) => {
+            pdfFile = event.target.files[0];
+            if (pdfFile) {
+                fileNameDisplay.textContent = `Selected: ${pdfFile.name}`;
+                extractBtn.disabled = false;
+            } else {
+                fileNameDisplay.textContent = '';
+                extractBtn.disabled = true;
+            }
+        });
+
+        // Handle the text extraction process
+        extractBtn.addEventListener('click', async () => {
+            if (!pdfFile) {
+                alert('Please select a PDF file first.');
+                return;
+            }
+
+            // Reset UI for processing
+            setLoading(true, 'Starting OCR process...');
+            output.textContent = '';
+            let fullText = '';
+
+            try {
+                const fileReader = new FileReader();
+
+                fileReader.onload = async (event) => {
+                    const typedarray = new Uint8Array(event.target.result);
+                    const pdf = await pdfjsLib.getDocument(typedarray).promise;
+                    
+                    statusText.textContent = `Processing ${pdf.numPages} pages...`;
+
+                    for (let i = 1; i <= pdf.numPages; i++) {
+                        statusText.textContent = `Reading page ${i} of ${pdf.numPages}...`;
+                        
+                        const page = await pdf.getPage(i);
+                        const viewport = page.getViewport({ scale: 2 });
+                        
+                        const canvas = document.createElement('canvas');
+                        const context = canvas.getContext('2d');
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+
+                        await page.render({ canvasContext: context, viewport: viewport }).promise;
+                        
+                        statusText.textContent = `Extracting text from page ${i}...`;
+                        
+                        // Perform OCR on the canvas
+                        const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
+                        
+                        fullText += text + '\n\n-- Page ' + i + ' --\n\n';
+                        output.textContent = fullText;
+                        output.scrollTop = output.scrollHeight; // Auto-scroll to bottom
+                    }
+                    
+                    setLoading(false, 'Extraction complete!');
+                };
+
+                fileReader.readAsArrayBuffer(pdfFile);
+
+            } catch (error) {
+                console.error('Error during OCR process:', error);
+                setLoading(false, `Error: ${error.message}`);
+            }
+        });
+
+        // Handle copying text to clipboard
+        copyBtn.addEventListener('click', () => {
+            if (output.textContent) {
+                // Using document.execCommand as a fallback for iframe environments
+                const textArea = document.createElement("textarea");
+                textArea.value = output.textContent;
+                textArea.style.position = "fixed"; // Avoid scrolling to bottom
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    statusText.textContent = 'Text copied to clipboard!';
+                } catch (err) {
+                    statusText.textContent = 'Failed to copy text.';
+                    console.error('Fallback: Oops, unable to copy', err);
+                }
+                document.body.removeChild(textArea);
+                
+                // Clear the message after a few seconds
+                setTimeout(() => {
+                    if (statusText.textContent === 'Text copied to clipboard!' || statusText.textContent === 'Failed to copy text.') {
+                         statusText.textContent = 'Extraction complete!';
+                    }
+                }, 3000);
+            }
+        });
+
+        // Handle saving text to a .txt file
+        saveBtn.addEventListener('click', () => {
+            if (output.textContent && pdfFile) {
+                const textToSave = output.textContent;
+                const blob = new Blob([textToSave], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                // Create a filename based on the original PDF name
+                const originalFilename = pdfFile.name.replace(/\.[^/.]+$/, "");
+                a.download = `${originalFilename}-extracted.txt`;
+                
+                document.body.appendChild(a);
+                a.click();
+                
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                statusText.textContent = 'Text saved as a .txt file!';
+                 setTimeout(() => {
+                    if (statusText.textContent === 'Text saved as a .txt file!') {
+                         // Revert to a general status message if it hasn't changed
+                         statusText.textContent = 'Extraction complete!';
+                    }
+                }, 3000);
+            }
+        });
+
+
+        // Utility function to manage loading state
+        function setLoading(isLoading, message) {
+            extractBtn.disabled = isLoading;
+            if (isLoading) {
+                loader.classList.remove('hidden');
+            } else {
+                loader.classList.add('hidden');
+            }
+            statusText.textContent = message;
+        }
+
+        // Initial state
+        extractBtn.disabled = true;
+
+    </script>
+</body>
+</html>
+

@@ -24,7 +24,12 @@ self.onmessage = async (event) => {
         const { imageData, pageIndex } = payload;
         
         // The recognize function provides detailed data including words and their bounding boxes.
-        const { data } = await scheduler.addJob('recognize', imageData);
+        const { data } = await scheduler.addJob('recognize', imageData, {}, {
+            // Tell Tesseract to report progress back to us.
+            progress: (p) => {
+                self.postMessage({ type: 'progress', payload: { ...p, pageIndex } });
+            }
+        });
         
         // Send back the full data structure, which includes text, words, bboxes, etc.
         self.postMessage({ type: 'result', payload: { pageIndex, data } });

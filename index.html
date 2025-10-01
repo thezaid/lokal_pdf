@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF Tools - Client-Side PDF Processing</title>
+    <title>Lokal PDF - Private & Secure Client-Side Tools</title>
     
     <!-- Tailwind CSS for styling -->
     <script src="https://cdn.tailwindcss.com"></script>
@@ -18,9 +18,8 @@
     
     <!-- PDF.js: For rendering PDF previews -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js"></script>
     <script>
-        // Configure the PDF.js worker
+        // Configure the PDF.js worker. The worker script itself should NOT be included in the HTML.
         pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js`;
     </script>
 
@@ -109,6 +108,24 @@
             justify-content: center;
             border-radius: 0.375rem;
         }
+        .rearrange-page-item {
+            cursor: grab;
+        }
+        .rearrange-page-item:active {
+            cursor: grabbing;
+        }
+        .options-group {
+            background-color: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-top: 1rem;
+        }
+        .options-group h4 {
+            font-weight: 600;
+            color: #475569;
+            margin-bottom: 0.75rem;
+        }
     </style>
 </head>
 <body class="text-slate-800">
@@ -118,7 +135,7 @@
 
         <!-- Header -->
         <header class="text-center mb-10">
-            <h1 class="text-4xl md:text-5xl font-bold text-indigo-600 mb-2">PDF Tools</h1>
+            <h1 class="text-4xl md:text-5xl font-bold text-indigo-600 mb-2">Lokal PDF</h1>
             <p class="text-lg text-slate-500">Fast, private, and secure PDF tools that run entirely in your browser.</p>
             <p class="text-sm text-slate-400 mt-2">Your files never leave your computer.</p>
         </header>
@@ -152,7 +169,7 @@
         // Immediately-invoked function expression (IIFE) to encapsulate the app logic
         (async () => {
             // Destructure PDFLib functions for easy access
-            const { PDFDocument, rgb, StandardFonts, degrees } = PDFLib;
+            const { PDFDocument, rgb, StandardFonts, degrees, PageSizes } = PDFLib;
 
             // DOM Element References
             const toolGrid = document.getElementById('tool-grid');
@@ -165,6 +182,9 @@
             // --- STATE ---
             let selectedFiles = [];
             let pagesToRemove = new Set();
+            let currentTool = null;
+            let lastUsedPdfDoc = null; // Cache the last parsed PDF doc for performance
+            let ocrResultData = {}; // Stores detailed OCR data for sandwich PDF
 
             // --- AVAILABLE TOOLS ---
             const tools = [
@@ -178,6 +198,15 @@
                     process: processMerge,
                 },
                 {
+                    id: 'rearrange-pages',
+                    title: 'Rearrange Pages',
+                    icon: 'shuffle',
+                    description: 'Merge multiple PDFs and freely rearrange all their pages.',
+                    multipleFiles: true,
+                    render: renderRearrangeUI,
+                    process: processRearrange,
+                },
+                {
                     id: 'split',
                     title: 'Split PDF',
                     icon: 'scissors',
@@ -186,20 +215,11 @@
                     render: renderSplitUI,
                     process: processSplit,
                 },
-                {
-                    id: 'remove-pages',
-                    title: 'Remove Pages',
-                    icon: 'file-minus-2',
-                    description: 'Click on pages in the preview to select them for removal.',
-                    multipleFiles: false,
-                    render: renderRemovePagesUI,
-                    process: processRemovePages,
-                },
                  {
                     id: 'ocr',
-                    title: 'Extract Text (OCR)',
-                    icon: 'file-text',
-                    description: 'Recognize and extract text from a scanned PDF.',
+                    title: 'Make Searchable (OCR)',
+                    icon: 'file-search-2',
+                    description: 'Make a scanned PDF searchable and copyable.',
                     multipleFiles: false,
                     render: renderOcrUI,
                     process: processOcr,
@@ -214,13 +234,13 @@
                     process: processRotate,
                 },
                 {
-                    id: 'add-watermark',
-                    title: 'Add Watermark',
-                    icon: 'stamp',
-                    description: 'Add a text watermark to every page of your PDF.',
+                    id: 'remove-pages',
+                    title: 'Remove Pages',
+                    icon: 'file-minus-2',
+                    description: 'Select and remove specific pages from a PDF.',
                     multipleFiles: false,
-                    render: renderWatermarkUI,
-                    process: processWatermark,
+                    render: renderRemovePagesUI,
+                    process: processRemovePages,
                 },
                 {
                     id: 'add-numbers',
@@ -230,6 +250,15 @@
                     multipleFiles: false,
                     render: renderPageNumbersUI,
                     process: processPageNumbers,
+                },
+                {
+                    id: 'add-watermark',
+                    title: 'Add Watermark',
+                    icon: 'stamp',
+                    description: 'Stamp text over every page of your PDF.',
+                    multipleFiles: false,
+                    render: renderWatermarkUI,
+                    process: processWatermark,
                 },
                 {
                     id: 'image-to-pdf',
@@ -254,7 +283,6 @@
 
             // --- CORE UI FUNCTIONS ---
 
-            // Renders the main grid of tool cards
             function renderToolGrid() {
                 toolGrid.innerHTML = '';
                 tools.forEach(tool => {
@@ -270,12 +298,8 @@
                 lucide.createIcons();
             }
 
-            // Shows the workspace for a selected tool
             function showWorkspace(tool) {
-                // Reset state
-                selectedFiles = [];
-                pagesToRemove.clear();
-
+                currentTool = tool;
                 toolGrid.classList.add('hidden');
                 workspace.classList.remove('hidden');
                 workspace.innerHTML = `
@@ -292,7 +316,7 @@
                         </div>
                         <div class="grid grid-cols-1 lg:grid-cols-5 gap-8">
                             <div id="preview-container" class="lg:col-span-3 bg-slate-100 p-2 rounded-lg h-[70vh] overflow-auto border flex items-center justify-center">
-                                <p class="text-slate-400 text-center p-4">Select a file to see a preview.</p>
+                                <p class="text-slate-400 text-center p-4">Select or drop file(s) here to see a preview.</p>
                             </div>
                             <div id="tool-options-container" class="lg:col-span-2 flex flex-col">
                                 <p class="text-slate-500 mb-4">${tool.description}</p>
@@ -308,39 +332,37 @@
                 const toolOptionsContainer = document.getElementById('tool-options-container');
                 const toolSpecificOptions = document.getElementById('tool-specific-options');
 
-                // Render the file input as the primary action
                 createFileInput(toolOptionsContainer, tool);
-                
-                // Render the unique options for the selected tool
                 tool.render(toolSpecificOptions, tool);
 
-                // Render the final process button, unless it's a special case like OCR
-                if (tool.id !== 'ocr') {
-                    createProcessButton(toolOptionsContainer, tool, 'Process');
-                }
+                const buttonText = tool.id === 'ocr' ? 'Start OCR' : (tool.id === 'pdf-to-image' ? 'Convert to Images' : 'Process');
+                createProcessButton(toolOptionsContainer, tool, buttonText);
 
                 lucide.createIcons();
             }
 
-            // Hides the workspace and shows the tool grid
             function hideWorkspace() {
+                currentTool = null;
                 workspace.innerHTML = '';
                 workspace.classList.add('hidden');
                 toolGrid.classList.remove('hidden');
+                selectedFiles = [];
+                pagesToRemove.clear();
+                lastUsedPdfDoc = null;
+                ocrResultData = {};
             }
 
-            // Generic UI for file input with drag and drop
             function createFileInput(parent, tool) {
                  const fileInputHTML = `
-                    <div id="drop-zone" class="mb-4 border-2 border-dashed border-slate-300 rounded-lg p-8 text-center transition-colors">
-                        <i data-lucide="upload-cloud" class="w-12 h-12 text-slate-400 mx-auto mb-4"></i>
-                        <label for="file-input" class="font-medium text-indigo-600 hover:text-indigo-500 cursor-pointer">
-                            Choose file(s)
-                            <input type="file" id="file-input" class="sr-only" 
+                    <div id="drop-zone" class="mb-4 p-6 border-2 border-dashed border-slate-300 rounded-lg text-center cursor-pointer hover:border-indigo-500 transition-colors">
+                        <label for="file-input" class="flex flex-col items-center justify-center">
+                             <i data-lucide="upload-cloud" class="w-10 h-10 text-slate-400 mb-2"></i>
+                            <span class="font-semibold text-indigo-600">Click to upload</span>
+                            <span class="text-slate-500">or drag and drop</span>
+                            <input type="file" id="file-input" class="hidden" 
                                 ${tool.multipleFiles ? 'multiple' : ''} 
                                 accept="${tool.accept || '.pdf'}">
                         </label>
-                        <p class="text-slate-500 text-sm mt-1">or drag and drop here</p>
                     </div>
                 `;
                 parent.insertAdjacentHTML('afterbegin', fileInputHTML);
@@ -359,15 +381,8 @@
 
                 fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
                 
-                // Drag and Drop listeners
-                dropZone.addEventListener('dragover', (e) => {
-                    e.preventDefault();
-                    dropZone.classList.add('drop-zone-active');
-                });
-                dropZone.addEventListener('dragleave', (e) => {
-                    e.preventDefault();
-                    dropZone.classList.remove('drop-zone-active');
-                });
+                dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drop-zone-active'); });
+                dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drop-zone-active'));
                 dropZone.addEventListener('drop', (e) => {
                     e.preventDefault();
                     dropZone.classList.remove('drop-zone-active');
@@ -375,10 +390,12 @@
                 });
             }
 
-            // Central function to update previews
             function updatePreview(tool) {
+                lastUsedPdfDoc = null; // Clear cache on new file selection
                 if (tool.id === 'image-to-pdf' || tool.id === 'merge') {
                     renderDraggableFileList(tool);
+                } else if (tool.id === 'rearrange-pages') {
+                    renderRearrangePreview(selectedFiles);
                 } else if (selectedFiles.length > 0 && selectedFiles[0].type === 'application/pdf') {
                     renderPdfPreview(selectedFiles[0], tool.id);
                 } else if (selectedFiles.length > 0) {
@@ -388,13 +405,11 @@
                 }
             }
 
-
-            // Generic UI for the process button
             function createProcessButton(parent, tool, buttonText = 'Process') {
                 const buttonHTML = `
                     <div class="mt-auto border-t pt-6 text-right">
                         <button id="process-button" class="bg-indigo-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-indigo-700 transition-all shadow-sm flex items-center gap-2 ml-auto">
-                            <i data-lucide="${tool.id === 'ocr' ? 'scan-text' : 'settings-2'}" class="w-5 h-5"></i>
+                            <i data-lucide="${tool.icon}" class="w-5 h-5"></i>
                             ${buttonText}
                         </button>
                     </div>
@@ -406,14 +421,20 @@
                         showToast('Please select one or more files.', 'error');
                         return;
                     }
-                    showSpinner(true);
+                    // For OCR, the button starts the process, it doesn't wait for it.
+                    if (tool.id !== 'ocr') {
+                        showSpinner(true, 'Processing...');
+                    }
                     try {
                         await tool.process(tool.id);
-                    } catch (error) {
+                    } catch (error)
+                    {
                         console.error('An error occurred:', error);
                         showToast(error.message || 'An unexpected error occurred.', 'error');
                     } finally {
-                        showSpinner(false);
+                        if (tool.id !== 'ocr') {
+                           showSpinner(false);
+                        }
                     }
                 });
                 lucide.createIcons();
@@ -421,58 +442,81 @@
             
             // --- UI RENDERERS FOR EACH TOOL ---
 
-            function renderMergeUI(parent, tool) {
-                // No specific options needed for merge besides the file input.
+            function renderMergeUI(parent, tool) { /* No extra options needed */ }
+            function renderRearrangeUI(parent, tool) { /* No extra options needed */ }
+            function renderImageToPdfUI(parent, tool) {
+                parent.innerHTML += `
+                    <div class="options-group">
+                        <h4>Page Options</h4>
+                        <div class="space-y-4">
+                            <div>
+                                <label for="img-page-size" class="block mb-2 font-medium text-slate-700 text-sm">Page Size</label>
+                                <select id="img-page-size" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                    <option value="A4">A4</option>
+                                    <option value="Letter">Letter</option>
+                                    <option value="fit">Fit to Image</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="img-margin" class="block mb-2 font-medium text-slate-700 text-sm">Margin</label>
+                                <select id="img-margin" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                    <option value="0">No Margin</option>
+                                    <option value="20">Small Margin</option>
+                                    <option value="50">Large Margin</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                `;
             }
 
             function renderSplitUI(parent, tool) {
                 parent.innerHTML += `
-                    <div class="mt-4">
-                        <label for="split-ranges" class="block mb-2 font-medium text-slate-700">Page Ranges</label>
-                        <input type="text" id="split-ranges" placeholder="e.g., 1-3, 5, 8-10" class="w-full p-2 border border-slate-300 rounded-md">
-                    </div>
+                     <div class="options-group">
+                        <h4>Split Mode</h4>
+                        <div class="space-y-2">
+                            <div class="flex items-center">
+                                <input type="radio" id="split-mode-range" name="split-mode" value="range" checked class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                <label for="split-mode-range" class="ml-3 block text-sm font-medium text-gray-700">Extract by range</label>
+                            </div>
+                            <input type="text" id="split-ranges" placeholder="e.g., 1-3, 5, 8-10" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                        </div>
+                        <div class="space-y-2 mt-4">
+                            <div class="flex items-center">
+                                <input type="radio" id="split-mode-fixed" name="split-mode" value="fixed" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                <label for="split-mode-fixed" class="ml-3 block text-sm font-medium text-gray-700">Split every X pages</label>
+                            </div>
+                            <input type="number" id="split-fixed-range" value="1" min="1" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                        </div>
+                     </div>
                 `;
-            }
-
-            function renderRemovePagesUI(parent, tool) {
-                // No specific options needed, interaction is in the preview.
             }
 
             function renderRotateUI(parent, tool) {
                 parent.innerHTML += `
-                     <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                        <div>
-                            <label for="rotate-degrees" class="block mb-2 font-medium text-slate-700">Rotation Angle</label>
-                            <select id="rotate-degrees" class="w-full p-2 border border-slate-300 rounded-md">
-                                <option value="90">90° Clockwise</option>
-                                <option value="180">180°</option>
-                                <option value="270">270° Clockwise (-90°)</option>
-                            </select>
-                        </div>
-                        <div>
-                           <label for="rotate-pages" class="block mb-2 font-medium text-slate-700">Pages to Rotate</label>
-                           <input type="text" id="rotate-pages" placeholder="e.g., 1-3, 5 (blank for all)" class="w-full p-2 border border-slate-300 rounded-md">
-                        </div>
-                    </div>
-                `;
-            }
-
-            function renderWatermarkUI(parent, tool) {
-                parent.innerHTML += `
-                    <div class="space-y-4 mt-4">
-                        <div>
-                            <label for="watermark-text" class="block mb-2 font-medium text-slate-700">Watermark Text</label>
-                            <input type="text" id="watermark-text" value="CONFIDENTIAL" class="w-full p-2 border border-slate-300 rounded-md">
-                        </div>
-                        <div class="grid grid-cols-2 gap-4">
+                    <div class="options-group">
+                        <h4>Rotation Options</h4>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
-                               <label for="watermark-size" class="block mb-2 font-medium text-slate-700">Font Size</label>
-                               <input type="number" id="watermark-size" value="50" class="w-full p-2 border border-slate-300 rounded-md">
+                                <label for="rotate-degrees" class="block mb-2 font-medium text-slate-700 text-sm">Angle</label>
+                                <select id="rotate-degrees" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                    <option value="90">90° Clockwise</option>
+                                    <option value="180">180°</option>
+                                    <option value="270">270° Clockwise (-90°)</option>
+                                </select>
                             </div>
                             <div>
-                               <label for="watermark-opacity" class="block mb-2 font-medium text-slate-700">Opacity</label>
-                               <input type="range" id="watermark-opacity" min="0" max="1" step="0.1" value="0.5" class="w-full">
+                               <label for="rotate-condition" class="block mb-2 font-medium text-slate-700 text-sm">Apply to</label>
+                               <select id="rotate-condition" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                   <option value="all">All Pages</option>
+                                   <option value="portrait">Portrait Pages Only</option>
+                                   <option value="landscape">Landscape Pages Only</option>
+                               </select>
                             </div>
+                        </div>
+                        <div class="mt-4">
+                           <label for="rotate-pages" class="block mb-2 font-medium text-slate-700 text-sm">Specific pages (optional)</label>
+                           <input type="text" id="rotate-pages" placeholder="e.g., 1-3, 5 (overrides above)" class="w-full p-2 border border-slate-300 rounded-md text-sm">
                         </div>
                     </div>
                 `;
@@ -480,50 +524,176 @@
             
             function renderPageNumbersUI(parent, tool) {
                 parent.innerHTML += `
-                    <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                         <div>
-                            <label for="page-position" class="block mb-2 font-medium text-slate-700">Position</label>
-                            <select id="page-position" class="w-full p-2 border border-slate-300 rounded-md">
-                                <option value="bottom-center">Bottom Center</option>
-                                <option value="bottom-left">Bottom Left</option>
-                                <option value="bottom-right">Bottom Right</option>
-                                <option value="top-center">Top Center</option>
-                                <option value="top-left">Top Left</option>
-                                <option value="top-right">Top Right</option>
-                            </select>
-                        </div>
-                        <div>
-                           <label for="font-size" class="block mb-2 font-medium text-slate-700">Font Size</label>
-                           <input type="number" id="font-size" value="12" class="w-full p-2 border border-slate-300 rounded-md">
+                     <div class="options-group">
+                        <h4>Numbering Options</h4>
+                        <div class="space-y-4">
+                            <div class="grid grid-cols-2 gap-4">
+                                 <div>
+                                    <label for="page-position" class="block mb-2 font-medium text-slate-700 text-sm">Position</label>
+                                    <select id="page-position" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                        <option value="bottom-center">Bottom Center</option>
+                                        <option value="bottom-left">Bottom Left</option>
+                                        <option value="bottom-right">Bottom Right</option>
+                                        <option value="top-center">Top Center</option>
+                                        <option value="top-left">Top Left</option>
+                                        <option value="top-right">Top Right</option>
+                                    </select>
+                                </div>
+                                <div>
+                                   <label for="font-size" class="block mb-2 font-medium text-slate-700 text-sm">Font Size</label>
+                                   <input type="number" id="font-size" value="12" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                </div>
+                            </div>
+                            <div>
+                                <label for="page-format" class="block mb-2 font-medium text-slate-700 text-sm">Format</label>
+                                <select id="page-format" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                    <option value="n">{n}</option>
+                                    <option value="n-of-total">{n} of {total}</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label for="page-range" class="block mb-2 font-medium text-slate-700 text-sm">Apply to pages (optional)</label>
+                                <input type="text" id="page-range" placeholder="e.g., 2-10 (blank for all)" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                            </div>
                         </div>
                     </div>
                 `;
             }
-
-            function renderImageToPdfUI(parent, tool) {
-                // No specific options needed besides file input.
+            
+            function renderWatermarkUI(parent, tool) {
+                 parent.innerHTML += `
+                    <div class="options-group">
+                        <h4>Watermark Settings</h4>
+                        <div class="space-y-4">
+                            <div>
+                               <label for="watermark-text" class="block mb-2 font-medium text-slate-700 text-sm">Text</label>
+                               <input type="text" id="watermark-text" value="CONFIDENTIAL" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                 <div>
+                                   <label for="watermark-size" class="block mb-2 font-medium text-slate-700 text-sm">Font Size</label>
+                                   <input type="number" id="watermark-size" value="50" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                </div>
+                                <div>
+                                   <label for="watermark-opacity" class="block mb-2 font-medium text-slate-700 text-sm">Opacity</label>
+                                   <input type="range" id="watermark-opacity" min="0" max="1" step="0.1" value="0.5" class="w-full">
+                                </div>
+                            </div>
+                            <div class="flex items-center">
+                                <input id="watermark-tile" type="checkbox" class="h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500">
+                                <label for="watermark-tile" class="ml-2 block text-sm text-gray-900">Tile watermark</label>
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700">Layer</label>
+                                <div class="mt-2 flex space-x-4">
+                                    <div class="flex items-center">
+                                        <input type="radio" id="layer-overlay" name="watermark-layer" value="overlay" checked class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                        <label for="layer-overlay" class="ml-2 block text-sm font-medium text-gray-700">Overlay (on top)</label>
+                                    </div>
+                                    <div class="flex items-center">
+                                        <input type="radio" id="layer-underlay" name="watermark-layer" value="underlay" class="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500">
+                                        <label for="layer-underlay" class="ml-2 block text-sm font-medium text-gray-700">Underlay (behind)</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
             }
             
             function renderPdfToImageUI(parent, tool) {
                 parent.innerHTML += `
-                    <div class="mt-4">
-                        <label for="image-quality" class="block mb-2 font-medium text-slate-700">Image Quality</label>
-                        <input type="range" id="image-quality" min="0.1" max="1" step="0.1" value="0.8" class="w-full">
-                        <div class="text-sm text-slate-500 text-center mt-1">Lower quality means smaller file sizes.</div>
+                     <div class="options-group">
+                        <h4>Conversion Options</h4>
+                        <div class="space-y-4">
+                            <div>
+                                <label for="image-format" class="block mb-2 font-medium text-slate-700 text-sm">Image Format</label>
+                                <select id="image-format" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                                    <option value="jpeg">JPG</option>
+                                    <option value="png">PNG</option>
+                                </select>
+                            </div>
+                            <div id="quality-slider-container">
+                                <label for="image-quality" class="block mb-2 font-medium text-slate-700 text-sm">JPG Quality</label>
+                                <input type="range" id="image-quality" min="0.1" max="1" step="0.1" value="0.9" class="w-full">
+                            </div>
+                        </div>
                     </div>
                 `;
+                document.getElementById('image-format').addEventListener('change', e => {
+                    document.getElementById('quality-slider-container').style.display = e.target.value === 'jpeg' ? 'block' : 'none';
+                });
+            }
+
+             function renderRemovePagesUI(parent, tool) {
+                parent.innerHTML += `
+                    <div class="options-group">
+                        <h4>Quick Select</h4>
+                        <p class="text-sm text-slate-500 mb-2">Or, click pages in the preview.</p>
+                        <div class="flex flex-wrap gap-2">
+                            <button id="select-odd" class="text-sm bg-slate-200 px-3 py-1 rounded-md hover:bg-slate-300">Select Odd</button>
+                            <button id="select-even" class="text-sm bg-slate-200 px-3 py-1 rounded-md hover:bg-slate-300">Select Even</button>
+                            <button id="invert-selection" class="text-sm bg-slate-200 px-3 py-1 rounded-md hover:bg-slate-300">Invert</button>
+                        </div>
+                    </div>
+                `;
+                const updateTotalPages = async () => {
+                     if (!lastUsedPdfDoc) {
+                        const file = selectedFiles[0];
+                        const pdfBytes = await file.arrayBuffer();
+                        lastUsedPdfDoc = await PDFDocument.load(pdfBytes);
+                    }
+                    return lastUsedPdfDoc.getPageCount();
+                };
+                document.getElementById('select-odd').addEventListener('click', async () => {
+                    const totalPages = await updateTotalPages();
+                    pagesToRemove.clear();
+                    for(let i=0; i<totalPages; i++) if((i+1) % 2 !== 0) pagesToRemove.add(i);
+                    updatePreview(currentTool);
+                });
+                document.getElementById('select-even').addEventListener('click', async () => {
+                    const totalPages = await updateTotalPages();
+                    pagesToRemove.clear();
+                    for(let i=0; i<totalPages; i++) if((i+1) % 2 === 0) pagesToRemove.add(i);
+                    updatePreview(currentTool);
+                });
+                document.getElementById('invert-selection').addEventListener('click', async () => {
+                    const totalPages = await updateTotalPages();
+                    const newPagesToRemove = new Set();
+                    for(let i=0; i<totalPages; i++) if(!pagesToRemove.has(i)) newPagesToRemove.add(i);
+                    pagesToRemove = newPagesToRemove;
+                    updatePreview(currentTool);
+                });
             }
 
             function renderOcrUI(parent, tool) {
                 parent.innerHTML = `
-                    <div class="mt-4 bg-slate-50 rounded-lg border h-full flex flex-col">
+                    <div class="options-group">
+                        <h4>Language</h4>
+                        <select id="ocr-lang" class="w-full p-2 border border-slate-300 rounded-md text-sm">
+                            <option value="eng">English</option>
+                            <option value="spa">Spanish</option>
+                            <option value="fra">French</option>
+                            <option value="deu">German</option>
+                        </select>
+                    </div>
+                    <div id="ocr-progress-container" class="mt-4 hidden">
+                        <div class="w-full bg-slate-200 rounded-full h-2.5">
+                            <div id="ocr-progress-bar" class="bg-indigo-600 h-2.5 rounded-full" style="width: 0%"></div>
+                        </div>
+                        <p id="ocr-status-text" class="text-sm text-center text-slate-500 mt-2"></p>
+                    </div>
+                    <div id="ocr-results" class="mt-4 bg-slate-50 rounded-lg border h-full flex flex-col hidden">
                         <div class="p-3 border-b flex justify-between items-center">
-                            <h3 class="font-semibold text-slate-700">Extracted Text</h3>
+                            <h3 class="font-semibold text-slate-700">OCR Results</h3>
                             <div class="flex items-center space-x-2">
-                                <button id="copy-btn" class="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 rounded-md transition disabled:opacity-50" title="Copy Text" disabled>
+                                <button id="save-sandwich-btn" class="p-1.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-md transition" title="Save as Searchable PDF">
+                                    <i data-lucide="file-search-2" class="w-4 h-4"></i>
+                                </button>
+                                <button id="copy-btn" class="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 rounded-md transition" title="Copy Text">
                                     <i data-lucide="copy" class="w-4 h-4"></i>
                                 </button>
-                                <button id="save-btn" class="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 rounded-md transition disabled:opacity-50" title="Save as .txt" disabled>
+                                <button id="save-btn" class="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 rounded-md transition" title="Save as .txt">
                                     <i data-lucide="save" class="w-4 h-4"></i>
                                 </button>
                             </div>
@@ -531,44 +701,29 @@
                         <pre id="ocr-output" class="whitespace-pre-wrap text-sm text-slate-800 bg-white p-3 flex-grow overflow-y-auto"></pre>
                     </div>
                 `;
-                createProcessButton(parent.parentElement, tool, 'Extract Text');
                 
+                lucide.createIcons();
+                
+                document.getElementById('save-sandwich-btn').addEventListener('click', createSandwichPdf);
+
                 document.getElementById('copy-btn').addEventListener('click', () => {
                     const output = document.getElementById('ocr-output');
                     if (output.textContent) {
-                         const textArea = document.createElement("textarea");
-                         textArea.value = output.textContent;
-                         textArea.style.position = "fixed";
-                         document.body.appendChild(textArea);
-                         textArea.focus();
-                         textArea.select();
-                         try {
-                             document.execCommand('copy');
+                         navigator.clipboard.writeText(output.textContent).then(() => {
                              showToast('Text copied to clipboard!', 'success');
-                         } catch (err) {
+                         }, () => {
                              showToast('Failed to copy text.', 'error');
-                         }
-                         document.body.removeChild(textArea);
+                         });
                     }
                 });
 
                 document.getElementById('save-btn').addEventListener('click', () => {
                     const output = document.getElementById('ocr-output');
                     if (output.textContent && selectedFiles.length > 0) {
-                        const originalFilename = selectedFiles[0].name.replace(/\.[^/.]+$/, "");
-                        download(output.textContent, `${originalFilename}-extracted.txt`, 'text/plain');
+                        const filename = generateOutputFilename('ocr', 'txt');
+                        download(output.textContent, filename, 'text/plain');
                     }
                 });
-                
-                // Add progress bar container for OCR
-                parent.innerHTML += `
-                    <div class="mt-4">
-                         <div id="ocr-progress-container" class="w-full bg-slate-200 rounded-full h-2.5 hidden">
-                            <div id="ocr-progress-bar" class="bg-indigo-600 h-2.5 rounded-full" style="width: 0%"></div>
-                         </div>
-                         <p id="ocr-status-text" class="text-sm text-slate-500 text-center mt-1"></p>
-                    </div>
-                `;
             }
 
 
@@ -583,53 +738,74 @@
                     copiedPages.forEach(page => mergedPdf.addPage(page));
                 }
                 const pdfBytes = await mergedPdf.save();
-                download(pdfBytes, 'merged.pdf', 'application/pdf');
+                const filename = generateOutputFilename(toolId, 'pdf');
+                download(pdfBytes, filename, 'application/pdf');
                 showToast('PDFs merged successfully!', 'success');
             }
 
-            async function processSplit(toolId) {
-                const ranges = document.getElementById('split-ranges').value;
-                if (!ranges) throw new Error('Please specify page ranges.');
+            async function processRearrange(toolId) {
+                const previewContainer = document.getElementById('preview-container');
+                const pageElements = previewContainer.querySelectorAll('.rearrange-page-item');
+                if (pageElements.length === 0) throw new Error('No pages available to rearrange.');
+
+                showSpinner(true, 'Loading source PDFs...');
+                const pdfDocsToCopy = await Promise.all(selectedFiles.map(f => f.arrayBuffer().then(b => PDFDocument.load(b))));
                 
-                const file = selectedFiles[0];
-                const pdfBytes = await file.arrayBuffer();
-                const pdfDoc = await PDFDocument.load(pdfBytes);
-                const pageCount = pdfDoc.getPageCount();
-
-                const pageIndices = parsePageRanges(ranges, pageCount);
-                if(pageIndices.length === 0) throw new Error('Invalid or empty page ranges provided.');
-
+                showSpinner(true, 'Assembling new document...');
                 const newPdf = await PDFDocument.create();
-                const copiedPages = await newPdf.copyPages(pdfDoc, pageIndices);
-                copiedPages.forEach(page => newPdf.addPage(page));
+
+                for (const pageElement of pageElements) {
+                    const docIndex = parseInt(pageElement.dataset.docIndex);
+                    const pageIndex = parseInt(pageElement.dataset.pageIndex);
+                    
+                    const sourceDoc = pdfDocsToCopy[docIndex];
+                    const [copiedPage] = await newPdf.copyPages(sourceDoc, [pageIndex]);
+                    newPdf.addPage(copiedPage);
+                }
 
                 const newPdfBytes = await newPdf.save();
-                download(newPdfBytes, `split-${file.name}`, 'application/pdf');
-                showToast('PDF split successfully!', 'success');
+                const filename = generateOutputFilename(toolId, 'pdf');
+                download(newPdfBytes, filename, 'application/pdf');
+                showToast('Pages rearranged successfully!', 'success');
             }
 
-            async function processRemovePages(toolId) {
-                if (pagesToRemove.size === 0) {
-                    throw new Error('No pages selected for removal. Click pages in the preview to select them.');
-                }
+            async function processSplit(toolId) {
                 const file = selectedFiles[0];
                 const pdfBytes = await file.arrayBuffer();
                 const pdfDoc = await PDFDocument.load(pdfBytes);
                 
-                const allIndices = pdfDoc.getPageIndices();
-                const indicesToKeep = allIndices.filter(index => !pagesToRemove.has(index));
-
-                if (indicesToKeep.length === 0) {
-                    throw new Error('You cannot remove all pages from the document.');
-                }
+                const splitMode = document.querySelector('input[name="split-mode"]:checked').value;
                 
-                const newPdf = await PDFDocument.create();
-                const copiedPages = await newPdf.copyPages(pdfDoc, indicesToKeep);
-                copiedPages.forEach(page => newPdf.addPage(page));
-
-                const newPdfBytes = await newPdf.save();
-                download(newPdfBytes, `edited-${file.name}`, 'application/pdf');
-                showToast(`${pagesToRemove.size} page(s) removed successfully!`, 'success');
+                if (splitMode === 'range') {
+                    const ranges = document.getElementById('split-ranges').value;
+                    if (!ranges) throw new Error('Please specify page ranges.');
+                    const pageIndices = parsePageRanges(ranges, pdfDoc.getPageCount());
+                    if(pageIndices.length === 0) throw new Error('Invalid or empty page ranges provided.');
+                    
+                    const newPdf = await PDFDocument.create();
+                    const copiedPages = await newPdf.copyPages(pdfDoc, pageIndices);
+                    copiedPages.forEach(page => newPdf.addPage(page));
+                    const newPdfBytes = await newPdf.save();
+                    const filename = generateOutputFilename(toolId, 'pdf');
+                    download(newPdfBytes, filename, 'application/pdf');
+                } else if (splitMode === 'fixed') {
+                    const rangeSize = parseInt(document.getElementById('split-fixed-range').value);
+                    if (rangeSize < 1) throw new Error('Fixed range must be at least 1.');
+                    const zip = new JSZip();
+                    const pageIndices = pdfDoc.getPageIndices();
+                    for (let i = 0; i < pageIndices.length; i += rangeSize) {
+                        const newPdf = await PDFDocument.create();
+                        const chunkIndices = pageIndices.slice(i, i + rangeSize);
+                        const copiedPages = await newPdf.copyPages(pdfDoc, chunkIndices);
+                        copiedPages.forEach(page => newPdf.addPage(page));
+                        const newPdfBytes = await newPdf.save();
+                        zip.file(`part_${Math.floor(i/rangeSize) + 1}.pdf`, newPdfBytes);
+                    }
+                    const zipBlob = await zip.generateAsync({ type: 'blob' });
+                    const zipFilename = generateOutputFilename(toolId, 'zip');
+                    download(zipBlob, zipFilename, 'application/zip');
+                }
+                showToast('PDF split successfully!', 'success');
             }
             
             async function processRotate(toolId) {
@@ -637,72 +813,56 @@
                 const pdfBytes = await file.arrayBuffer();
                 const pdfDoc = await PDFDocument.load(pdfBytes);
                 
-                const degreesValue = parseInt(document.getElementById('rotate-degrees').value);
+                const angle = parseInt(document.getElementById('rotate-degrees').value);
+                const condition = document.getElementById('rotate-condition').value;
                 const pageRanges = document.getElementById('rotate-pages').value;
                 
-                const pageCount = pdfDoc.getPageCount();
-                const indicesToRotate = pageRanges ? parsePageRanges(pageRanges, pageCount) : pdfDoc.getPageIndices();
+                let indicesToRotate;
+                if (pageRanges) {
+                    indicesToRotate = parsePageRanges(pageRanges, pdfDoc.getPageCount());
+                } else {
+                    indicesToRotate = pdfDoc.getPageIndices().filter(i => {
+                        if (condition === 'all') return true;
+                        const { width, height } = pdfDoc.getPage(i).getSize();
+                        return condition === 'portrait' ? height > width : width > height;
+                    });
+                }
 
                 indicesToRotate.forEach(index => {
                     const page = pdfDoc.getPage(index);
-                    // Correctly apply rotation using the `degrees` function from pdf-lib
-                    page.rotate(degrees(degreesValue));
+                    const currentRotation = page.getRotation().angle;
+                    page.setRotation(degrees((currentRotation + angle) % 360));
                 });
 
                 const newPdfBytes = await pdfDoc.save();
-                download(newPdfBytes, `rotated-${file.name}`, 'application/pdf');
+                const filename = generateOutputFilename(toolId, 'pdf');
+                download(newPdfBytes, filename, 'application/pdf');
                 showToast('PDF rotated successfully!', 'success');
-            }
-            
-            async function processWatermark(toolId) {
-                const file = selectedFiles[0];
-                const pdfBytes = await file.arrayBuffer();
-                const pdfDoc = await PDFDocument.load(pdfBytes);
-                const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-
-                const text = document.getElementById('watermark-text').value;
-                const size = parseInt(document.getElementById('watermark-size').value);
-                const opacity = parseFloat(document.getElementById('watermark-opacity').value);
-
-                const pages = pdfDoc.getPages();
-                for (const page of pages) {
-                    const { width, height } = page.getSize();
-                    const textWidth = font.widthOfTextAtSize(text, size);
-
-                    page.drawText(text, {
-                        x: width / 2 - textWidth / 2,
-                        y: height / 2,
-                        font,
-                        size,
-                        color: rgb(0, 0, 0),
-                        opacity: opacity,
-                        rotate: degrees(45),
-                    });
-                }
-                
-                const newPdfBytes = await pdfDoc.save();
-                download(newPdfBytes, `watermarked-${file.name}`, 'application/pdf');
-                showToast('Watermark added successfully!', 'success');
             }
             
             async function processPageNumbers(toolId) {
                 const file = selectedFiles[0];
                 const pdfBytes = await file.arrayBuffer();
                 const pdfDoc = await PDFDocument.load(pdfBytes);
-                const pages = pdfDoc.getPages();
+                const totalPages = pdfDoc.getPageCount();
                 
                 const position = document.getElementById('page-position').value;
                 const fontSize = parseInt(document.getElementById('font-size').value);
+                const format = document.getElementById('page-format').value;
+                const pageRange = document.getElementById('page-range').value;
+                
                 const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+                const indicesToNumber = pageRange ? parsePageRanges(pageRange, totalPages) : pdfDoc.getPageIndices();
 
-                for (let i = 0; i < pages.length; i++) {
-                    const page = pages[i];
+                for (const i of indicesToNumber) {
+                    const page = pdfDoc.getPage(i);
                     const { width, height } = page.getSize();
                     const pageNum = i + 1;
+                    const text = format === 'n' ? `${pageNum}` : `${pageNum} of ${totalPages}`;
                     
                     let x, y;
                     const margin = 30;
-                    const textWidth = font.widthOfTextAtSize(String(pageNum), fontSize);
+                    const textWidth = font.widthOfTextAtSize(text, fontSize);
 
                     switch(position) {
                         case 'bottom-left': x = margin; y = margin; break;
@@ -710,100 +870,167 @@
                         case 'top-center': x = width / 2 - textWidth / 2; y = height - margin - fontSize; break;
                         case 'top-left': x = margin; y = height - margin - fontSize; break;
                         case 'top-right': x = width - margin - textWidth; y = height - margin - fontSize; break;
-                        default: // bottom-center
-                            x = width / 2 - textWidth / 2;
-                            y = margin;
-                            break;
+                        default: x = width / 2 - textWidth / 2; y = margin; break; // bottom-center
                     }
-                    
-                    page.drawText(String(pageNum), { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
+                    page.drawText(text, { x, y, size: fontSize, font, color: rgb(0, 0, 0) });
                 }
 
                 const newPdfBytes = await pdfDoc.save();
-                download(newPdfBytes, `numbered-${file.name}`, 'application/pdf');
+                const filename = generateOutputFilename(toolId, 'pdf');
+                download(newPdfBytes, filename, 'application/pdf');
                 showToast('Page numbers added successfully!', 'success');
+            }
+            
+            async function processWatermark(toolId) {
+                const file = selectedFiles[0];
+                const pdfBytes = await file.arrayBuffer();
+                const pdfDoc = await PDFDocument.load(pdfBytes);
+                
+                const text = document.getElementById('watermark-text').value;
+                const size = parseInt(document.getElementById('watermark-size').value);
+                const opacity = parseFloat(document.getElementById('watermark-opacity').value);
+                const isTiled = document.getElementById('watermark-tile').checked;
+                const layer = document.querySelector('input[name="watermark-layer"]:checked').value;
+                
+                const font = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+                
+                const drawOptions = { size, font, color: rgb(0.5, 0.5, 0.5), opacity };
+                
+                pdfDoc.getPages().forEach(page => {
+                    const { width, height } = page.getSize();
+                    const textWidth = font.widthOfTextAtSize(text, size);
+                    
+                    const drawTextOnPage = (targetPage) => {
+                         if(isTiled) {
+                            for(let y = -height; y < height * 2; y += size * 4) {
+                                for (let x = -width; x < width * 2; x += textWidth + size * 2) {
+                                    targetPage.drawText(text, { ...drawOptions, x, y, rotate: degrees(-45) });
+                                }
+                            }
+                        } else {
+                            targetPage.drawText(text, { ...drawOptions, x: width / 2 - textWidth / 2, y: height / 2, rotate: degrees(-45) });
+                        }
+                    }
+
+                    if (layer === 'underlay') {
+                        page.pushOperators(page.moveTo(0,0)); // Hack to ensure content stream exists
+                        const contentStream = page.getContentStream();
+                        const newContentStream = pdfDoc.createContentStream();
+                        drawTextOnPage({ drawText: (...args) => newContentStream.drawText(...args) });
+                        page.setContentStream(newContentStream, { prepend: true });
+
+                    } else { // overlay
+                        drawTextOnPage(page);
+                    }
+                });
+
+                const newPdfBytes = await pdfDoc.save();
+                const filename = generateOutputFilename(toolId, 'pdf');
+                download(newPdfBytes, filename, 'application/pdf');
+                showToast('Watermark added successfully!', 'success');
             }
 
             async function processImageToPdf(toolId) {
                 const pdfDoc = await PDFDocument.create();
+                const pageSize = document.getElementById('img-page-size').value;
+                const margin = parseInt(document.getElementById('img-margin').value);
+
                 for (const file of selectedFiles) {
                     const imgBytes = await file.arrayBuffer();
                     const image = file.type === 'image/png' 
                         ? await pdfDoc.embedPng(imgBytes) 
                         : await pdfDoc.embedJpg(imgBytes);
                     
-                    const page = pdfDoc.addPage();
-                    const { width, height } = image.scale(1);
-                    page.setSize(width, height);
-                    page.drawImage(image, { x: 0, y: 0, width, height });
+                    const pageDimensions = pageSize === 'fit' ? [image.width, image.height] : (pageSize === 'Letter' ? PageSizes.Letter : PageSizes.A4);
+                    const page = pdfDoc.addPage(pageDimensions);
+                    
+                    const availableWidth = page.getWidth() - margin * 2;
+                    const availableHeight = page.getHeight() - margin * 2;
+                    const imgDims = image.scaleToFit(availableWidth, availableHeight);
+
+                    page.drawImage(image, {
+                        x: page.getWidth() / 2 - imgDims.width / 2,
+                        y: page.getHeight() / 2 - imgDims.height / 2,
+                        width: imgDims.width,
+                        height: imgDims.height,
+                    });
                 }
 
                 const pdfBytes = await pdfDoc.save();
-                download(pdfBytes, 'images.pdf', 'application/pdf');
+                const filename = generateOutputFilename(toolId, 'pdf');
+                download(pdfBytes, filename, 'application/pdf');
                 showToast('Images converted to PDF!', 'success');
+            }
+
+            async function processRemovePages(toolId) {
+                 if (pagesToRemove.size === 0) throw new Error('No pages selected for removal.');
+                const file = selectedFiles[0];
+                const pdfBytes = await file.arrayBuffer();
+                const pdfDoc = await PDFDocument.load(pdfBytes);
+                
+                const indicesToRemove = Array.from(pagesToRemove).sort((a,b) => b-a);
+                for(const index of indicesToRemove) pdfDoc.removePage(index);
+
+                const newPdfBytes = await pdfDoc.save();
+                const filename = generateOutputFilename(toolId, 'pdf');
+                download(newPdfBytes, filename, 'application/pdf');
+                showToast('Pages removed successfully!', 'success');
+                pagesToRemove.clear();
             }
 
             async function processPdfToImage(toolId) {
                 const file = selectedFiles[0];
+                const format = document.getElementById('image-format').value;
                 const quality = parseFloat(document.getElementById('image-quality').value);
-                const zip = new JSZip();
                 
                 const fileReader = new FileReader();
-                fileReader.onload = async (event) => {
-                    const typedarray = new Uint8Array(event.target.result);
-                    const pdf = await pdfjsLib.getDocument(typedarray).promise;
-                    const numPages = pdf.numPages;
+                fileReader.onload = async function() {
+                    const typedarray = new Uint8Array(this.result);
+                    const pdfDoc = await pdfjsLib.getDocument(typedarray).promise;
+                    const zip = new JSZip();
 
-                    showSpinner(true, `Converting ${numPages} pages...`);
+                    showSpinner(true, `Converting ${pdfDoc.numPages} pages...`);
 
-                    for (let i = 1; i <= numPages; i++) {
-                        showSpinner(true, `Converting page ${i} of ${numPages}`);
-                        const page = await pdf.getPage(i);
+                    for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+                        const page = await pdfDoc.getPage(pageNum);
                         const viewport = page.getViewport({ scale: 2.0 });
-                        
                         const canvas = document.createElement('canvas');
-                        const context = canvas.getContext('2d');
                         canvas.height = viewport.height;
                         canvas.width = viewport.width;
-
-                        await page.render({ canvasContext: context, viewport }).promise;
                         
-                        const imageDataUrl = canvas.toDataURL('image/jpeg', quality);
-                        // We need to convert the data URL to a blob to add to the zip
+                        await page.render({ canvasContext: canvas.getContext('2d'), viewport: viewport }).promise;
+                        
+                        const mimeType = `image/${format}`;
+                        const imageDataUrl = canvas.toDataURL(mimeType, format === 'jpeg' ? quality : undefined);
                         const blob = await (await fetch(imageDataUrl)).blob();
-                        zip.file(`page_${i}.jpg`, blob);
+                        zip.file(`page_${pageNum}.${format}`, blob);
                     }
-                    
-                    showSpinner(true, 'Compressing images into a zip file...');
+
                     const zipBlob = await zip.generateAsync({ type: 'blob' });
-                    const originalFilename = file.name.replace(/\.[^/.]+$/, "");
-                    download(zipBlob, `${originalFilename}.zip`, 'application/zip');
+                    const zipFilename = generateOutputFilename(toolId, 'zip');
+                    download(zipBlob, zipFilename, 'application/zip');
                     showToast('PDF converted to images!', 'success');
-                    showSpinner(false);
                 };
                 fileReader.readAsArrayBuffer(file);
             }
             
             async function processOcr(toolId) {
                 const file = selectedFiles[0];
+                const lang = document.getElementById('ocr-lang').value;
                 const output = document.getElementById('ocr-output');
-                const copyBtn = document.getElementById('copy-btn');
-                const saveBtn = document.getElementById('save-btn');
-                
+                const resultsContainer = document.getElementById('ocr-results');
                 const progressContainer = document.getElementById('ocr-progress-container');
                 const progressBar = document.getElementById('ocr-progress-bar');
                 const statusText = document.getElementById('ocr-status-text');
+                const processBtn = document.getElementById('process-button');
 
                 output.textContent = '';
-                copyBtn.disabled = true;
-                saveBtn.disabled = true;
-                progressContainer.classList.add('hidden');
-                progressBar.style.width = '0%';
-                statusText.textContent = '';
+                resultsContainer.classList.add('hidden');
+                progressContainer.classList.remove('hidden');
+                processBtn.disabled = true;
+                ocrResultData = {}; // Clear previous results
 
-                // Create and manage the Web Worker
                 const ocrWorker = new Worker('ocr-worker.js');
-                let fullTextByPage = {};
                 let pageCount = 0;
                 
                 ocrWorker.onmessage = (event) => {
@@ -813,33 +1040,29 @@
                             const progress = payload.progress * 100;
                             progressBar.style.width = `${progress}%`;
                         }
-                        statusText.textContent = payload.status;
+                        statusText.textContent = `Page ${payload.pageIndex + 1}: ${payload.status}`;
                     } else if (type === 'result') {
-                        fullTextByPage[payload.pageIndex] = payload.text;
-                        // Reconstruct the full text in order
+                        ocrResultData[payload.pageIndex] = payload.data;
                         let fullText = '';
                         for(let i = 0; i < pageCount; i++) {
-                            if(fullTextByPage[i]) {
-                                fullText += fullTextByPage[i] + `\n\n--- Page ${i + 1} ---\n\n`;
+                            if(ocrResultData[i]) {
+                                fullText += ocrResultData[i].text + `\n\n--- Page ${i + 1} ---\n\n`;
                             }
                         }
                         output.textContent = fullText;
                         output.scrollTop = output.scrollHeight;
                     } else if (type === 'ready') {
-                         // Worker is initialized, now we can start processing pages.
                         startPdfProcessing();
                     } else if (type === 'terminated') {
-                        showSpinner(false);
                         showToast('Text extraction complete!', 'success');
                         statusText.textContent = 'Extraction Complete!';
-                        copyBtn.disabled = false;
-                        saveBtn.disabled = false;
+                        resultsContainer.classList.remove('hidden');
+                        processBtn.disabled = false;
                     }
                 };
                 
-                // 1. Initialize the worker
                 showSpinner(true, 'Initializing OCR engine...');
-                ocrWorker.postMessage({ type: 'init' });
+                ocrWorker.postMessage({ type: 'init', payload: { lang } });
 
                 const startPdfProcessing = () => {
                     const fileReader = new FileReader();
@@ -848,39 +1071,104 @@
                         const pdf = await pdfjsLib.getDocument(typedarray).promise;
                         pageCount = pdf.numPages;
 
-                        showSpinner(true, `Loading PDF with ${pageCount} pages...`);
-                        progressContainer.classList.remove('hidden');
+                        showSpinner(false);
+                        showToast(`Starting OCR on ${pageCount} pages...`, 'success');
 
                         for (let i = 1; i <= pageCount; i++) {
-                            statusText.textContent = `Rendering page ${i} for OCR...`;
                             const page = await pdf.getPage(i);
-                            const viewport = page.getViewport({ scale: 2.0 });
-
-                            const canvas = document.createElement('canvas');
-                            const context = canvas.getContext('2d');
-                            canvas.height = viewport.height;
-                            canvas.width = viewport.width;
-                            await page.render({ canvasContext: context, viewport }).promise;
-
-                            const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+                            // We need to get the original, unscaled viewport to map coordinates correctly later
+                            const originalViewport = page.getViewport({ scale: 1.0 });
                             
-                            // 2. Send image data to the worker for recognition
+                            // But render a higher-res version for better OCR accuracy
+                            const renderScale = 2.0;
+                            const renderViewport = page.getViewport({ scale: renderScale });
+                            const canvas = document.createElement('canvas');
+                            canvas.height = renderViewport.height;
+                            canvas.width = renderViewport.width;
+                            await page.render({ canvasContext: canvas.getContext('2d'), viewport: renderViewport }).promise;
+                            const imageData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+                            
                             ocrWorker.postMessage({ 
                                 type: 'recognize', 
-                                payload: { imageData: imageData, pageIndex: i-1 }
+                                payload: { 
+                                    imageData, 
+                                    pageIndex: i - 1,
+                                    // Pass original dimensions for coordinate mapping
+                                    originalPageDimensions: { width: originalViewport.width, height: originalViewport.height }
+                                }
                             });
                         }
-                        // 3. After all pages are sent, tell the worker to terminate
                         ocrWorker.postMessage({ type: 'terminate' });
                     };
                     fileReader.readAsArrayBuffer(file);
                 };
             }
 
+            async function createSandwichPdf() {
+                if (Object.keys(ocrResultData).length === 0) {
+                    showToast('No OCR data available. Please run OCR first.', 'error');
+                    return;
+                }
+                showSpinner(true, 'Creating Searchable PDF...');
+                try {
+                    const pdfBytes = await selectedFiles[0].arrayBuffer();
+                    const pdfDoc = await PDFDocument.load(pdfBytes);
+                    const pages = pdfDoc.getPages();
+                    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+
+                    for (let i = 0; i < pages.length; i++) {
+                        const page = pages[i];
+                        const { width, height } = page.getSize();
+                        const ocrPageData = ocrResultData[i];
+                        if (!ocrPageData) continue;
+
+                        // Tesseract's coordinates are based on the image it processed. We need to scale them
+                        // back to the PDF's coordinate system.
+                        const imageWidth = ocrPageData.image_width;
+                        const imageHeight = ocrPageData.image_height;
+                        const scaleX = width / imageWidth;
+                        const scaleY = height / imageHeight;
+
+                        ocrPageData.words.forEach(word => {
+                            const bbox = word.bbox;
+                            const text = word.text;
+                            
+                            const x = bbox.x0 * scaleX;
+                            const y = height - (bbox.y1 * scaleY); // Y-coordinate is inverted
+                            const textWidth = font.widthOfTextAtSize(text, 10); // Aproximate width
+                            const textHeight = (bbox.y1 - bbox.y0) * scaleY;
+                            
+                            // Adjust font size to fit width of the box. This is a heuristic.
+                            const fontSize = Math.min(textHeight, ( (bbox.x1 - bbox.x0) * scaleX / textWidth) * 10);
+                            
+                            page.drawText(text, {
+                                x,
+                                y,
+                                font,
+                                size: fontSize,
+                                color: rgb(0, 0, 0),
+                                opacity: 0, // Make the text invisible
+                            });
+                        });
+                    }
+
+                    const newPdfBytes = await pdfDoc.save();
+                    const filename = generateOutputFilename('ocr-searchable', 'pdf');
+                    download(newPdfBytes, filename, 'application/pdf');
+                    showToast('Searchable PDF created successfully!', 'success');
+
+                } catch(error) {
+                    console.error("Failed to create sandwich PDF:", error);
+                    showToast('Error creating searchable PDF.', 'error');
+                } finally {
+                    showSpinner(false);
+                }
+            }
+
 
             // --- PREVIEW RENDERER FUNCTIONS ---
 
-            function clearPreview(message = 'Select a file to see a preview.') {
+            function clearPreview(message = 'Select or drop file(s) here to see a preview.') {
                 const previewContainer = document.getElementById('preview-container');
                 previewContainer.innerHTML = `<p class="text-slate-400 text-center p-4">${message}</p>`;
             }
@@ -893,25 +1181,31 @@
                     const fileReader = new FileReader();
                     fileReader.onload = async function() {
                         const typedarray = new Uint8Array(this.result);
-                        const pdfDoc = await pdfjsLib.getDocument(typedarray).promise;
+                        lastUsedPdfDoc = await pdfjsLib.getDocument(typedarray).promise;
                         
-                        previewContainer.innerHTML = ''; // Clear spinner
-                        
-                        for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+                        previewContainer.innerHTML = '';
+                        const gridContainer = document.createElement('div');
+                        gridContainer.className = 'grid grid-cols-2 md:grid-cols-3 gap-4';
+                        previewContainer.appendChild(gridContainer);
+
+                        for (let pageNum = 1; pageNum <= lastUsedPdfDoc.numPages; pageNum++) {
                             const pageIndex = pageNum - 1;
-                            const page = await pdfDoc.getPage(pageNum);
-                            const viewport = page.getViewport({ scale: 1.5 });
+                            const page = await lastUsedPdfDoc.getPage(pageNum);
+                            const viewport = page.getViewport({ scale: 1.0 });
                             
                             const container = document.createElement('div');
-                            container.className = 'page-preview-container mb-4 shadow-md';
+                            container.className = 'page-preview-container shadow-md';
+                            if (pagesToRemove.has(pageIndex) && toolId === 'remove-pages') {
+                                container.classList.add('selected-for-removal');
+                            }
                             
                             const canvas = document.createElement('canvas');
-                            const context = canvas.getContext('2d');
+                            canvas.className = 'w-full h-auto rounded-md';
                             canvas.height = viewport.height;
                             canvas.width = viewport.width;
                             
                             container.appendChild(canvas);
-                            previewContainer.appendChild(container);
+                            gridContainer.appendChild(container);
 
                             if (toolId === 'remove-pages') {
                                 container.addEventListener('click', () => {
@@ -924,12 +1218,7 @@
                                     }
                                 });
                             }
-                            
-                            const renderContext = {
-                                canvasContext: context,
-                                viewport: viewport
-                            };
-                            await page.render(renderContext).promise;
+                            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
                         }
                     };
                     fileReader.readAsArrayBuffer(file);
@@ -939,80 +1228,130 @@
                 }
             }
             
-            function renderImagePreview(files) {
+            async function renderRearrangePreview(files) {
                 const previewContainer = document.getElementById('preview-container');
-                previewContainer.innerHTML = '';
-                const grid = document.createElement('div');
-                grid.className = 'grid grid-cols-2 gap-2 p-2';
-                files.forEach(file => {
-                    const img = document.createElement('img');
-                    img.src = URL.createObjectURL(file);
-                    img.className = 'w-full h-auto object-cover rounded-md';
-                    img.onload = () => URL.revokeObjectURL(img.src);
-                    grid.appendChild(img);
-                });
-                previewContainer.appendChild(grid);
+                previewContainer.innerHTML = '<div class="spinner border-4 border-t-4 border-slate-200 border-t-indigo-600 rounded-full w-12 h-12"></div>';
+
+                try {
+                    const gridContainer = document.createElement('div');
+                    gridContainer.className = 'grid grid-cols-2 md:grid-cols-3 gap-4';
+                    
+                    const allPages = [];
+                    for (let docIndex = 0; docIndex < files.length; docIndex++) {
+                        const file = files[docIndex];
+                        const typedarray = new Uint8Array(await file.arrayBuffer());
+                        const pdfDoc = await pdfjsLib.getDocument(typedarray).promise;
+                        for (let pageNum = 1; pageNum <= pdfDoc.numPages; pageNum++) {
+                            const page = await pdfDoc.getPage(pageNum);
+                            allPages.push({ docIndex, pageIndex: pageNum - 1, page });
+                        }
+                    }
+
+                    previewContainer.innerHTML = '';
+                    previewContainer.appendChild(gridContainer);
+                    
+                    allPages.forEach(async ({ docIndex, pageIndex, page }) => {
+                        const viewport = page.getViewport({ scale: 1.0 });
+                        const container = document.createElement('div');
+                        container.className = 'rearrange-page-item page-preview-container shadow-md';
+                        container.draggable = true;
+                        container.dataset.docIndex = docIndex;
+                        container.dataset.pageIndex = pageIndex;
+
+                        const canvas = document.createElement('canvas');
+                        canvas.className = 'w-full h-auto rounded-md';
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+                        
+                        container.appendChild(canvas);
+                        gridContainer.appendChild(container);
+                        
+                        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+                    });
+                    
+                    let draggedItem = null;
+                    gridContainer.addEventListener('dragstart', e => {
+                        draggedItem = e.target.closest('.rearrange-page-item');
+                        if (draggedItem) setTimeout(() => draggedItem.classList.add('dragging'), 0);
+                    });
+                    gridContainer.addEventListener('dragend', e => {
+                        if (draggedItem) draggedItem.classList.remove('dragging');
+                        draggedItem = null;
+                    });
+                    gridContainer.addEventListener('dragover', e => {
+                        e.preventDefault();
+                        const afterElement = getDragAfterElement(gridContainer, e.clientY);
+                        if (draggedItem) {
+                             if (afterElement == null) gridContainer.appendChild(draggedItem);
+                             else gridContainer.insertBefore(draggedItem, afterElement);
+                        }
+                    });
+
+                } catch (error) {
+                    console.error("Error rendering rearrange preview:", error);
+                    clearPreview('Could not display a preview for these PDFs.');
+                }
+
+                function getDragAfterElement(container, y) {
+                    const draggableElements = [...container.querySelectorAll('.rearrange-page-item:not(.dragging)')];
+                    return draggableElements.reduce((closest, child) => {
+                        const box = child.getBoundingClientRect();
+                        const offset = y - box.top - box.height / 2;
+                        if (offset < 0 && offset > closest.offset) {
+                            return { offset: offset, element: child };
+                        } else {
+                            return closest;
+                        }
+                    }, { offset: Number.NEGATIVE_INFINITY }).element;
+                }
             }
 
             function renderDraggableFileList(tool) {
-                const previewContainer = document.getElementById('preview-container');
-                let listHTML = `<ul id="draggable-list" class="w-full p-4 text-left space-y-2">`;
-                selectedFiles.forEach((file, index) => {
-                    listHTML += `
-                        <li class="draggable-item flex items-center gap-3 bg-white p-2 rounded-md shadow-sm border" draggable="true" data-index="${index}">
+                 const previewContainer = document.getElementById('preview-container');
+                 previewContainer.innerHTML = `<div id="draggable-list" class="w-full p-4 text-left space-y-2"></div>`;
+                 const list = document.getElementById('draggable-list');
+
+                 const updateList = () => {
+                     list.innerHTML = '';
+                     selectedFiles.forEach((file, index) => {
+                         const item = document.createElement('div');
+                         item.className = 'draggable-item flex items-center gap-3 p-2 bg-white rounded-md shadow-sm border';
+                         item.draggable = true;
+                         item.dataset.index = index;
+                         item.innerHTML = `
                             <i data-lucide="grip-vertical" class="w-5 h-5 text-slate-400"></i>
-                            <span class="text-sm text-slate-700 flex-grow">${file.name}</span>
-                        </li>
-                    `;
-                });
-                listHTML += `</ul>`;
-                previewContainer.innerHTML = listHTML;
-                lucide.createIcons();
+                            <span class="text-slate-700 text-sm truncate">${file.name}</span>
+                         `;
+                         list.appendChild(item);
+                     });
+                     lucide.createIcons();
+                 }
 
-                const list = document.getElementById('draggable-list');
-                let draggedItem = null;
+                 updateList();
 
-                list.addEventListener('dragstart', e => {
-                    draggedItem = e.target;
-                    setTimeout(() => e.target.classList.add('dragging'), 0);
-                });
-
-                list.addEventListener('dragend', e => {
-                    setTimeout(() => {
-                        if (draggedItem) {
-                            draggedItem.classList.remove('dragging');
-                        }
-                        draggedItem = null;
-                    }, 0);
-                });
-
-                list.addEventListener('dragover', e => {
+                 let draggedItem = null;
+                 list.addEventListener('dragstart', e => {
+                     draggedItem = e.target.closest('.draggable-item');
+                     if (draggedItem) setTimeout(() => draggedItem.classList.add('dragging'), 0);
+                 });
+                 list.addEventListener('dragend', e => {
+                     if(!draggedItem) return;
+                     draggedItem.classList.remove('dragging');
+                     const originalIndices = selectedFiles.map((_, i) => i);
+                     const newOrderIndices = Array.from(list.querySelectorAll('.draggable-item')).map(item => parseInt(item.dataset.index));
+                     const newSelectedFiles = newOrderIndices.map(i => selectedFiles[i]);
+                     selectedFiles = newSelectedFiles;
+                     updateList();
+                     draggedItem = null;
+                 });
+                 list.addEventListener('dragover', e => {
                     e.preventDefault();
                     const afterElement = getDragAfterElement(list, e.clientY);
-                    const currentElement = document.querySelector('.dragging');
-                    if (afterElement == null) {
-                        list.appendChild(currentElement);
-                    } else {
-                        list.insertBefore(currentElement, afterElement);
+                    if(draggedItem) {
+                         if (afterElement == null) list.appendChild(draggedItem);
+                         else list.insertBefore(draggedItem, afterElement);
                     }
-                });
-                
-                list.addEventListener('drop', e => {
-                    e.preventDefault();
-                    // Check if draggedItem exists to prevent errors
-                    if (!draggedItem) return;
-                    
-                    const newOrder = [...list.querySelectorAll('.draggable-item')].map(item => {
-                         // Find the file from the original selectedFiles array based on the text content
-                         // This is more robust than relying on index after reordering
-                         const fileName = item.querySelector('span').textContent;
-                         return selectedFiles.find(f => f.name === fileName);
-                    });
-                    selectedFiles = newOrder.filter(f => f); // Filter out any undefined if names mismatch
-                    
-                    // Re-render to update UI and internal state correctly
-                    renderDraggableFileList(tool);
-                });
+                 });
 
                  function getDragAfterElement(container, y) {
                     const draggableElements = [...container.querySelectorAll('.draggable-item:not(.dragging)')];
@@ -1028,32 +1367,18 @@
                 }
             }
 
-
-            function renderMergePreview(files) {
-                renderDraggableFileList({id: 'merge'});
-            }
-
             // --- HELPER FUNCTIONS ---
 
-            // Toggles the visibility of the spinner
             function showSpinner(visible, message = '') {
                 spinnerMessage.textContent = message;
                 spinner.classList.toggle('hidden', !visible);
             }
-
-            // Displays a toast notification
             function showToast(message, type = 'success') {
                 toastMessage.textContent = message;
-                toast.className = `fixed bottom-5 right-5 p-4 rounded-lg shadow-xl text-white toast ${
-                    type === 'success' ? 'bg-green-500' : 'bg-red-500'
-                }`;
+                toast.className = `fixed bottom-5 right-5 p-4 rounded-lg shadow-xl text-white toast ${ type === 'success' ? 'bg-green-500' : 'bg-red-500' }`;
                 toast.classList.remove('hidden');
-                setTimeout(() => {
-                    toast.classList.add('hidden');
-                }, 4000);
+                setTimeout(() => toast.classList.add('hidden'), 4000);
             }
-
-            // Triggers a file download in the browser
             function download(bytes, filename, mimeType) {
                 const blob = new Blob([bytes], { type: mimeType });
                 const link = document.createElement('a');
@@ -1064,14 +1389,29 @@
                 document.body.removeChild(link);
                 URL.revokeObjectURL(link.href);
             }
+            
+            function generateOutputFilename(toolId, extension) {
+                const tool = tools.find(t => t.id === toolId);
+                const toolName = tool ? tool.title.replace(/\s+/g, '_') : 'processed';
 
-            // Parses page range strings (e.g., "1-3, 5, 8-10") into an array of zero-based indices
+                const now = new Date();
+                const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
+
+                let baseFilename = 'Lokal_PDF'; // Fallback
+                if (selectedFiles.length > 0) {
+                    baseFilename = selectedFiles[0].name.substring(0, selectedFiles[0].name.lastIndexOf('.')) || selectedFiles[0].name;
+                }
+                
+                return `${baseFilename}-${toolName}-${timestamp}.${extension}`;
+            }
+
             function parsePageRanges(ranges, pageCount) {
                 const indices = new Set();
                 const parts = ranges.split(',').map(s => s.trim());
                 for (const part of parts) {
                     if (part.includes('-')) {
-                        const [start, end] = part.split('-').map(Number);
+                        let [start, end] = part.split('-').map(Number);
+                        if(end > pageCount) end = pageCount;
                         for (let i = start; i <= end; i++) {
                             if (i > 0 && i <= pageCount) indices.add(i - 1);
                         }
@@ -1083,7 +1423,6 @@
                 return Array.from(indices).sort((a,b) => a - b);
             }
 
-
             // --- INITIALIZATION ---
             document.addEventListener('DOMContentLoaded', () => {
                 renderToolGrid();
@@ -1093,5 +1432,4 @@
     </script>
 </body>
 </html>
-
 

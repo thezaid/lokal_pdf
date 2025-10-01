@@ -185,6 +185,7 @@
             let currentTool = null;
             let lastUsedPdfDoc = null; // Cache the last parsed PDF doc for performance
             let ocrResultData = {}; // Stores detailed OCR data for sandwich PDF
+            let activeOcrWorker = null; // Holds the active web worker instance
 
             // --- AVAILABLE TOOLS ---
             const tools = [
@@ -223,6 +224,15 @@
                     multipleFiles: false,
                     render: renderOcrUI,
                     process: processOcr,
+                },
+                {
+                    id: 'text-extractor',
+                    title: 'Text Extractor',
+                    icon: 'pilcrow',
+                    description: 'Extract text content from a digital PDF.',
+                    multipleFiles: false,
+                    render: renderTextExtractorUI,
+                    process: processTextExtractor,
                 },
                 {
                     id: 'rotate',
@@ -335,13 +345,21 @@
                 createFileInput(toolOptionsContainer, tool);
                 tool.render(toolSpecificOptions, tool);
 
-                const buttonText = tool.id === 'ocr' ? 'Start OCR' : (tool.id === 'pdf-to-image' ? 'Convert to Images' : 'Process');
-                createProcessButton(toolOptionsContainer, tool, buttonText);
+                const isImmediateTool = ['text-extractor'].includes(tool.id);
+                 if (!isImmediateTool) {
+                    const buttonText = tool.id === 'ocr' ? 'Start OCR' : (tool.id === 'pdf-to-image' ? 'Convert to Images' : 'Process');
+                    createProcessButton(toolOptionsContainer, tool, buttonText);
+                }
+
 
                 lucide.createIcons();
             }
 
             function hideWorkspace() {
+                if (activeOcrWorker) {
+                    activeOcrWorker.terminate();
+                    activeOcrWorker = null;
+                }
                 currentTool = null;
                 workspace.innerHTML = '';
                 workspace.classList.add('hidden');
@@ -377,6 +395,13 @@
                         return;
                     }
                     updatePreview(tool);
+                    // Automatically trigger processing for immediate tools like text extraction
+                    if (tool.id === 'text-extractor') {
+                        tool.process(tool.id);
+                    } else if (tool.id === 'ocr') {
+                        const processBtn = document.getElementById('process-button');
+                        if (processBtn) processBtn.disabled = false;
+                    }
                 };
 
                 fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
@@ -406,9 +431,10 @@
             }
 
             function createProcessButton(parent, tool, buttonText = 'Process') {
+                const isOcr = tool.id === 'ocr';
                 const buttonHTML = `
                     <div class="mt-auto border-t pt-6 text-right">
-                        <button id="process-button" class="bg-indigo-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-indigo-700 transition-all shadow-sm flex items-center gap-2 ml-auto">
+                        <button id="process-button" class="bg-indigo-600 text-white font-semibold py-2 px-6 rounded-lg hover:bg-indigo-700 transition-all shadow-sm flex items-center gap-2 ml-auto disabled:bg-slate-400 disabled:cursor-not-allowed" ${isOcr ? 'disabled' : ''}>
                             <i data-lucide="${tool.icon}" class="w-5 h-5"></i>
                             ${buttonText}
                         </button>
@@ -421,14 +447,12 @@
                         showToast('Please select one or more files.', 'error');
                         return;
                     }
-                    // For OCR, the button starts the process, it doesn't wait for it.
                     if (tool.id !== 'ocr') {
                         showSpinner(true, 'Processing...');
                     }
                     try {
                         await tool.process(tool.id);
-                    } catch (error)
-                    {
+                    } catch (error) {
                         console.error('An error occurred:', error);
                         showToast(error.message || 'An unexpected error occurred.', 'error');
                     } finally {
@@ -665,8 +689,42 @@
                     updatePreview(currentTool);
                 });
             }
+            
+            function renderTextExtractorUI(parent, tool) {
+                parent.innerHTML = `
+                    <div id="text-extractor-results" class="mt-4 bg-slate-50 rounded-lg border h-full flex flex-col hidden">
+                        <div class="p-3 border-b flex justify-between items-center">
+                            <h3 class="font-semibold text-slate-700">Extracted Text</h3>
+                            <div class="flex items-center space-x-2">
+                                <button id="copy-text-btn" class="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 rounded-md transition" title="Copy Text">
+                                    <i data-lucide="copy" class="w-4 h-4"></i>
+                                </button>
+                                <button id="save-text-btn" class="p-1.5 bg-slate-200 hover:bg-slate-300 text-slate-600 rounded-md transition" title="Save as .txt">
+                                    <i data-lucide="save" class="w-4 h-4"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <pre id="text-extractor-output" class="whitespace-pre-wrap text-sm text-slate-800 bg-white p-3 flex-grow overflow-y-auto"></pre>
+                    </div>
+                `;
+                lucide.createIcons();
+                document.getElementById('copy-text-btn').addEventListener('click', () => {
+                     const output = document.getElementById('text-extractor-output');
+                     if (output.textContent) {
+                         navigator.clipboard.writeText(output.textContent).then(() => showToast('Text copied!', 'success'), () => showToast('Copy failed.', 'error'));
+                     }
+                });
+                document.getElementById('save-text-btn').addEventListener('click', () => {
+                    const output = document.getElementById('text-extractor-output');
+                     if (output.textContent && selectedFiles.length > 0) {
+                        const filename = generateOutputFilename('text-extractor', 'txt');
+                        download(output.textContent, filename, 'text/plain');
+                    }
+                });
+            }
 
             function renderOcrUI(parent, tool) {
+                // Since this tool has a manual start button, we render it as part of the specific options
                 parent.innerHTML = `
                     <div class="options-group">
                         <h4>Language</h4>
@@ -1014,7 +1072,43 @@
                 fileReader.readAsArrayBuffer(file);
             }
             
+             async function processTextExtractor(toolId) {
+                const file = selectedFiles[0];
+                const resultsContainer = document.getElementById('text-extractor-results');
+                const output = document.getElementById('text-extractor-output');
+                resultsContainer.classList.remove('hidden');
+                output.textContent = 'Extracting...';
+
+                try {
+                    const fileReader = new FileReader();
+                    fileReader.onload = async function() {
+                        const typedarray = new Uint8Array(this.result);
+                        // Use pdf.js for text extraction as it's better at preserving reading order than pdf-lib
+                        const pdfDoc = await pdfjsLib.getDocument(typedarray).promise;
+                        let fullText = '';
+                        for (let i = 1; i <= pdfDoc.numPages; i++) {
+                            const page = await pdfDoc.getPage(i);
+                            const textContent = await page.getTextContent();
+                            const pageText = textContent.items.map(item => item.str).join(' ');
+                            fullText += pageText + '\n\n';
+                        }
+                        output.textContent = fullText.trim();
+                        showToast('Text extracted successfully!', 'success');
+                    };
+                    fileReader.readAsArrayBuffer(file);
+                } catch (error) {
+                    console.error("Error extracting text:", error);
+                    output.textContent = 'Failed to extract text from this PDF.';
+                    showToast('Text extraction failed.', 'error');
+                }
+            }
+            
             async function processOcr(toolId) {
+                // If a worker is already running, terminate it before starting a new one.
+                if (activeOcrWorker) {
+                    activeOcrWorker.terminate();
+                }
+
                 const file = selectedFiles[0];
                 const lang = document.getElementById('ocr-lang').value;
                 const output = document.getElementById('ocr-output');
@@ -1030,10 +1124,10 @@
                 processBtn.disabled = true;
                 ocrResultData = {}; // Clear previous results
 
-                const ocrWorker = new Worker('ocr-worker.js');
+                activeOcrWorker = new Worker('ocr-worker.js');
                 let pageCount = 0;
                 
-                ocrWorker.onmessage = (event) => {
+                activeOcrWorker.onmessage = (event) => {
                     const { type, payload } = event.data;
                     if (type === 'progress') {
                         if (payload.status === 'recognizing text') {
@@ -1042,10 +1136,12 @@
                         }
                         statusText.textContent = `Page ${payload.pageIndex + 1}: ${payload.status}`;
                     } else if (type === 'result') {
-                        ocrResultData[payload.pageIndex] = payload.data;
+                        // FIX: Merge worker data with existing data to preserve dimensions
+                        ocrResultData[payload.pageIndex] = { ...ocrResultData[payload.pageIndex], ...payload.data };
+                        
                         let fullText = '';
                         for(let i = 0; i < pageCount; i++) {
-                            if(ocrResultData[i]) {
+                            if(ocrResultData[i] && ocrResultData[i].text) {
                                 fullText += ocrResultData[i].text + `\n\n--- Page ${i + 1} ---\n\n`;
                             }
                         }
@@ -1058,11 +1154,12 @@
                         statusText.textContent = 'Extraction Complete!';
                         resultsContainer.classList.remove('hidden');
                         processBtn.disabled = false;
+                        activeOcrWorker = null; // Clear the worker instance
                     }
                 };
                 
                 showSpinner(true, 'Initializing OCR engine...');
-                ocrWorker.postMessage({ type: 'init', payload: { lang } });
+                activeOcrWorker.postMessage({ type: 'init', payload: { lang } });
 
                 const startPdfProcessing = () => {
                     const fileReader = new FileReader();
@@ -1076,10 +1173,6 @@
 
                         for (let i = 1; i <= pageCount; i++) {
                             const page = await pdf.getPage(i);
-                            // We need to get the original, unscaled viewport to map coordinates correctly later
-                            const originalViewport = page.getViewport({ scale: 1.0 });
-                            
-                            // But render a higher-res version for better OCR accuracy
                             const renderScale = 2.0;
                             const renderViewport = page.getViewport({ scale: renderScale });
                             const canvas = document.createElement('canvas');
@@ -1088,17 +1181,21 @@
                             await page.render({ canvasContext: canvas.getContext('2d'), viewport: renderViewport }).promise;
                             const imageData = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
                             
-                            ocrWorker.postMessage({ 
+                            // Store the dimensions of the rendered image for later scaling
+                            ocrResultData[i - 1] = {
+                                image_width: renderViewport.width,
+                                image_height: renderViewport.height
+                            };
+
+                            activeOcrWorker.postMessage({ 
                                 type: 'recognize', 
                                 payload: { 
                                     imageData, 
                                     pageIndex: i - 1,
-                                    // Pass original dimensions for coordinate mapping
-                                    originalPageDimensions: { width: originalViewport.width, height: originalViewport.height }
                                 }
                             });
                         }
-                        ocrWorker.postMessage({ type: 'terminate' });
+                        activeOcrWorker.postMessage({ type: 'terminate' });
                     };
                     fileReader.readAsArrayBuffer(file);
                 };
@@ -1120,10 +1217,10 @@
                         const page = pages[i];
                         const { width, height } = page.getSize();
                         const ocrPageData = ocrResultData[i];
-                        if (!ocrPageData) continue;
+                        
+                        // Ensure we have the necessary data before proceeding
+                        if (!ocrPageData || !ocrPageData.words || !ocrPageData.image_width) continue;
 
-                        // Tesseract's coordinates are based on the image it processed. We need to scale them
-                        // back to the PDF's coordinate system.
                         const imageWidth = ocrPageData.image_width;
                         const imageHeight = ocrPageData.image_height;
                         const scaleX = width / imageWidth;
@@ -1134,12 +1231,15 @@
                             const text = word.text;
                             
                             const x = bbox.x0 * scaleX;
-                            const y = height - (bbox.y1 * scaleY); // Y-coordinate is inverted
-                            const textWidth = font.widthOfTextAtSize(text, 10); // Aproximate width
-                            const textHeight = (bbox.y1 - bbox.y0) * scaleY;
+                            const y = height - (bbox.y1 * scaleY);
+                            const textWidth = font.widthOfTextAtSize(text, 10); // Aproximate width at a known size
+                            const wordWidth = (bbox.x1 - bbox.x0) * scaleX;
+                            const wordHeight = (bbox.y1 - bbox.y0) * scaleY;
                             
-                            // Adjust font size to fit width of the box. This is a heuristic.
-                            const fontSize = Math.min(textHeight, ( (bbox.x1 - bbox.x0) * scaleX / textWidth) * 10);
+                            if (wordWidth <= 0 || textWidth <= 0) return; // Avoid division by zero
+                            
+                            // Heuristic to scale the font size to fit the word's bounding box width
+                            const fontSize = Math.min(wordHeight, (wordWidth / textWidth) * 10);
                             
                             page.drawText(text, {
                                 x,
